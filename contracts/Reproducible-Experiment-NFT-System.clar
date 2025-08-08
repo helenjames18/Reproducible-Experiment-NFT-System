@@ -207,3 +207,81 @@
 (define-read-only (get-min-replications)
   (var-get min-successful-replications)
 ) 
+
+(define-map experiment-bounties
+  uint
+  {
+    total-pool: uint,
+    contributors-count: uint,
+    rewards-distributed: uint
+  }
+)
+
+(define-map bounty-contributors
+  {experiment-id: uint, contributor: principal}
+  uint
+)
+
+(define-public (contribute-bounty (experiment-id uint) (amount uint))
+  (let (
+    (experiment (unwrap! (map-get? experiments experiment-id) ERR-NOT-FOUND))
+    (current-bounty (default-to {total-pool: u0, contributors-count: u0, rewards-distributed: u0} 
+                               (map-get? experiment-bounties experiment-id)))
+    (current-contribution (default-to u0 (map-get? bounty-contributors {experiment-id: experiment-id, contributor: tx-sender})))
+  )
+    (asserts! (> amount u0) (err u107))
+    (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+    (map-set experiment-bounties
+      experiment-id
+      {
+        total-pool: (+ (get total-pool current-bounty) amount),
+        contributors-count: (if (is-eq current-contribution u0) 
+                              (+ (get contributors-count current-bounty) u1) 
+                              (get contributors-count current-bounty)),
+        rewards-distributed: (get rewards-distributed current-bounty)
+      }
+    )
+    (map-set bounty-contributors
+      {experiment-id: experiment-id, contributor: tx-sender}
+      (+ current-contribution amount)
+    )
+    (ok true)
+  )
+)
+
+(define-private (distribute-bounty-reward (experiment-id uint) (replicator principal))
+  (let (
+    (bounty (map-get? experiment-bounties experiment-id))
+    (experiment (unwrap! (map-get? experiments experiment-id) ERR-NOT-FOUND))
+  )
+    (match bounty
+      some-bounty
+      (let (
+        (total-pool (get total-pool some-bounty))
+        (successful-reps (get successful-replications experiment))
+        (reward-amount (if (> successful-reps u0) (/ total-pool successful-reps) u0))
+      )
+        (if (and (> reward-amount u0) (> total-pool (get rewards-distributed some-bounty)))
+          (begin
+            (try! (as-contract (stx-transfer? reward-amount tx-sender replicator)))
+            (map-set experiment-bounties
+              experiment-id
+              (merge some-bounty {rewards-distributed: (+ (get rewards-distributed some-bounty) reward-amount)})
+            )
+            (ok reward-amount)
+          )
+          (ok u0)
+        )
+      )
+      (ok u0)
+    )
+  )
+)
+
+(define-read-only (get-experiment-bounty (experiment-id uint))
+  (map-get? experiment-bounties experiment-id)
+)
+
+(define-read-only (get-user-bounty-contribution (experiment-id uint) (contributor principal))
+  (map-get? bounty-contributors {experiment-id: experiment-id, contributor: contributor})
+)
