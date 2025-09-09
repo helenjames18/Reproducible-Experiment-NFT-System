@@ -7,6 +7,10 @@
 (define-constant ERR-ALREADY-REPLICATED (err u105))
 (define-constant ERR-INVALID-RATING (err u106))
 
+(define-constant ERR-NOT-INVITED (err u108))
+(define-constant ERR-INVITE-EXPIRED (err u109))
+(define-constant ERR-ALREADY-INVITED (err u110))
+
 (define-data-var next-experiment-id uint u1)
 (define-data-var next-replication-id uint u1)
 (define-data-var next-token-id uint u1)
@@ -284,4 +288,76 @@
 
 (define-read-only (get-user-bounty-contribution (experiment-id uint) (contributor principal))
   (map-get? bounty-contributors {experiment-id: experiment-id, contributor: contributor})
+)
+
+(define-map experiment-invitations
+  {experiment-id: uint, invitee: principal}
+  {
+    inviter: principal,
+    invited-at: uint,
+    expires-at: uint,
+    accepted: bool
+  }
+)
+
+(define-map user-pending-invites
+  principal
+  (list 10 uint)
+)
+
+(define-public (invite-collaborator (experiment-id uint) (invitee principal) (duration-blocks uint))
+  (let (
+    (experiment (unwrap! (map-get? experiments experiment-id) ERR-NOT-FOUND))
+    (invite-key {experiment-id: experiment-id, invitee: invitee})
+    (current-height stacks-block-height)
+    (expires-at (+ current-height duration-blocks))
+  )
+    (asserts! (is-eq tx-sender (get creator experiment)) ERR-OWNER-ONLY)
+    (asserts! (is-none (map-get? experiment-invitations invite-key)) ERR-ALREADY-INVITED)
+    (asserts! (> duration-blocks u0) ERR-INVALID-REPLICATION)
+    (map-set experiment-invitations
+      invite-key
+      {
+        inviter: tx-sender,
+        invited-at: current-height,
+        expires-at: expires-at,
+        accepted: false
+      }
+    )
+    (let ((current-invites (default-to (list) (map-get? user-pending-invites invitee))))
+      (map-set user-pending-invites invitee (unwrap-panic (as-max-len? (append current-invites experiment-id) u10)))
+    )
+    (ok true)
+  )
+)
+
+(define-public (accept-invitation (experiment-id uint))
+  (let (
+    (invite-key {experiment-id: experiment-id, invitee: tx-sender})
+    (invitation (unwrap! (map-get? experiment-invitations invite-key) ERR-NOT-INVITED))
+    (current-height stacks-block-height)
+  )
+    (asserts! (<= current-height (get expires-at invitation)) ERR-INVITE-EXPIRED)
+    (asserts! (not (get accepted invitation)) ERR-ALREADY-EXISTS)
+    (map-set experiment-invitations
+      invite-key
+      (merge invitation {accepted: true})
+    )
+    (ok true)
+  )
+)
+
+(define-private (is-invited-collaborator (experiment-id uint) (user principal))
+  (match (map-get? experiment-invitations {experiment-id: experiment-id, invitee: user})
+    invitation (and (get accepted invitation) (<= stacks-block-height (get expires-at invitation)))
+    false
+  )
+)
+
+(define-read-only (get-invitation-status (experiment-id uint) (invitee principal))
+  (map-get? experiment-invitations {experiment-id: experiment-id, invitee: invitee})
+)
+
+(define-read-only (get-user-invitations (user principal))
+  (map-get? user-pending-invites user)
 )
