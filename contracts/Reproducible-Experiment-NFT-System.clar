@@ -11,6 +11,13 @@
 (define-constant ERR-INVITE-EXPIRED (err u109))
 (define-constant ERR-ALREADY-INVITED (err u110))
 
+(define-constant ERR-INSUFFICIENT-REPUTATION (err u111))
+(define-constant ERR-ALREADY-REVIEWED (err u112))
+(define-constant ERR-CANNOT-REVIEW-OWN (err u113))
+(define-constant MIN-REVIEWER-REPUTATION u50)
+
+(define-data-var required-positive-reviews uint u2)
+
 (define-data-var next-experiment-id uint u1)
 (define-data-var next-replication-id uint u1)
 (define-data-var next-token-id uint u1)
@@ -360,4 +367,85 @@
 
 (define-read-only (get-user-invitations (user principal))
   (map-get? user-pending-invites user)
+)
+
+(define-map experiment-reviews
+  {experiment-id: uint, reviewer: principal}
+  {
+    approved: bool,
+    review-score: uint,
+    feedback: (string-ascii 300),
+    reviewed-at: uint
+  }
+)
+
+(define-map experiment-review-summary
+  uint
+  {
+    total-reviews: uint,
+    positive-reviews: uint,
+    average-score: uint,
+    review-complete: bool
+  }
+)
+
+(define-public (submit-peer-review 
+  (experiment-id uint) 
+  (approved bool) 
+  (review-score uint) 
+  (feedback (string-ascii 300)))
+  (let (
+    (experiment (unwrap! (map-get? experiments experiment-id) ERR-NOT-FOUND))
+    (reviewer-rep (unwrap! (map-get? user-reputation tx-sender) ERR-INSUFFICIENT-REPUTATION))
+    (review-key {experiment-id: experiment-id, reviewer: tx-sender})
+    (current-summary (default-to 
+      {total-reviews: u0, positive-reviews: u0, average-score: u0, review-complete: false}
+      (map-get? experiment-review-summary experiment-id)))
+  )
+    (asserts! (not (is-eq tx-sender (get creator experiment))) ERR-CANNOT-REVIEW-OWN)
+    (asserts! (>= (get reputation-score reviewer-rep) MIN-REVIEWER-REPUTATION) ERR-INSUFFICIENT-REPUTATION)
+    (asserts! (is-none (map-get? experiment-reviews review-key)) ERR-ALREADY-REVIEWED)
+    (asserts! (and (>= review-score u1) (<= review-score u10)) ERR-INVALID-RATING)
+    (map-set experiment-reviews
+      review-key
+      {
+        approved: approved,
+        review-score: review-score,
+        feedback: feedback,
+        reviewed-at: stacks-block-height
+      }
+    )
+    (let (
+      (new-total (+ (get total-reviews current-summary) u1))
+      (new-positive (if approved (+ (get positive-reviews current-summary) u1) (get positive-reviews current-summary)))
+      (new-avg (/ (+ (* (get average-score current-summary) (get total-reviews current-summary)) review-score) new-total))
+      (is-complete (>= new-positive (var-get required-positive-reviews)))
+    )
+      (map-set experiment-review-summary
+        experiment-id
+        {
+          total-reviews: new-total,
+          positive-reviews: new-positive,
+          average-score: new-avg,
+          review-complete: is-complete
+        }
+      )
+      (ok is-complete)
+    )
+  )
+)
+
+(define-read-only (get-experiment-review-summary (experiment-id uint))
+  (map-get? experiment-review-summary experiment-id)
+)
+
+(define-read-only (get-peer-review (experiment-id uint) (reviewer principal))
+  (map-get? experiment-reviews {experiment-id: experiment-id, reviewer: reviewer})
+)
+
+(define-read-only (is-experiment-peer-approved (experiment-id uint))
+  (match (map-get? experiment-review-summary experiment-id)
+    summary (get review-complete summary)
+    false
+  )
 )
