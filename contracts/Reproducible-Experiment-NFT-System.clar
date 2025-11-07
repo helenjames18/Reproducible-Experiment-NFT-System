@@ -16,6 +16,10 @@
 (define-constant ERR-CANNOT-REVIEW-OWN (err u113))
 (define-constant MIN-REVIEWER-REPUTATION u50)
 
+(define-constant ERR-CITATION-EXISTS (err u114))
+(define-constant ERR-CANNOT-SELF-CITE (err u115))
+(define-constant MAX-CITATIONS-PER-EXPERIMENT u20)
+
 (define-data-var required-positive-reviews uint u2)
 
 (define-data-var next-experiment-id uint u1)
@@ -448,4 +452,84 @@
     summary (get review-complete summary)
     false
   )
+)
+
+(define-map experiment-citations
+  {experiment-id: uint, cited-experiment-id: uint}
+  {
+    citation-context: (string-ascii 200),
+    cited-at: uint
+  }
+)
+
+(define-map experiment-citation-count
+  uint
+  {
+    times-cited: uint,
+    cites-count: uint,
+    impact-score: uint
+  }
+)
+
+(define-map experiment-citations-list
+  uint
+  (list 20 uint)
+)
+
+(define-public (cite-experiment 
+  (experiment-id uint) 
+  (cited-experiment-id uint) 
+  (citation-context (string-ascii 200)))
+  (let (
+    (experiment (unwrap! (map-get? experiments experiment-id) ERR-NOT-FOUND))
+    (cited-experiment (unwrap! (map-get? experiments cited-experiment-id) ERR-NOT-FOUND))
+    (citation-key {experiment-id: experiment-id, cited-experiment-id: cited-experiment-id})
+    (cited-stats (default-to {times-cited: u0, cites-count: u0, impact-score: u0} 
+                             (map-get? experiment-citation-count cited-experiment-id)))
+    (citing-stats (default-to {times-cited: u0, cites-count: u0, impact-score: u0} 
+                              (map-get? experiment-citation-count experiment-id)))
+    (current-citations (default-to (list) (map-get? experiment-citations-list experiment-id)))
+  )
+    (asserts! (is-eq tx-sender (get creator experiment)) ERR-OWNER-ONLY)
+    (asserts! (not (is-eq experiment-id cited-experiment-id)) ERR-CANNOT-SELF-CITE)
+    (asserts! (is-none (map-get? experiment-citations citation-key)) ERR-CITATION-EXISTS)
+    (asserts! (< (len current-citations) MAX-CITATIONS-PER-EXPERIMENT) (err u116))
+    (map-set experiment-citations
+      citation-key
+      {
+        citation-context: citation-context,
+        cited-at: stacks-block-height
+      }
+    )
+    (map-set experiment-citation-count
+      cited-experiment-id
+      (merge cited-stats {
+        times-cited: (+ (get times-cited cited-stats) u1),
+        impact-score: (+ (get impact-score cited-stats) u10)
+      })
+    )
+    (map-set experiment-citation-count
+      experiment-id
+      (merge citing-stats {
+        cites-count: (+ (get cites-count citing-stats) u1)
+      })
+    )
+    (map-set experiment-citations-list 
+      experiment-id 
+      (unwrap-panic (as-max-len? (append current-citations cited-experiment-id) u20))
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-citation (experiment-id uint) (cited-experiment-id uint))
+  (map-get? experiment-citations {experiment-id: experiment-id, cited-experiment-id: cited-experiment-id})
+)
+
+(define-read-only (get-experiment-impact (experiment-id uint))
+  (map-get? experiment-citation-count experiment-id)
+)
+
+(define-read-only (get-experiment-citations-list (experiment-id uint))
+  (map-get? experiment-citations-list experiment-id)
 )
